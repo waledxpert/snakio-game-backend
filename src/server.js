@@ -189,7 +189,10 @@ function publicRoom(room) {
     endedAt: room.endedAt,
     remainingSeconds: remainingSeconds(room),
     result: room.result,
+    rematchCode: room.rematchCode || null,
+    rematchInviteUrl: room.rematchInviteUrl || null,
     players: room.players.map((player) => ({
+
       id: player.id,
       role: player.role,
       nickname: player.nickname,
@@ -420,6 +423,51 @@ app.post("/api/matches/:code/share", (req, res) => {
     shareId,
     shareUrl: buildShareUrl(shareId),
     expiresAt,
+  });
+});
+
+// POST /api/matches/:code/rematch
+// A finished match's player calls this to create a fresh room with the same
+// mode + settings. They become the host. Returns credentials + a new invite URL.
+app.post("/api/matches/:code/rematch", (req, res) => {
+  const room = getRoom(req.params.code);
+  if (!room) return res.status(404).json({ error: "Match not found" });
+  if (room.status !== "finished") return res.status(409).json({ error: "Match is not finished yet" });
+
+  const parsed = playerAuthSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Missing player credentials" });
+  const player = authorizePlayer(room, parsed.data.playerId, parsed.data.playerToken);
+  if (!player) return res.status(403).json({ error: "You are not a player in this match" });
+
+  // Build the new room with the same mode/settings. The requester becomes host.
+  const newRoom = createRoom({
+    hostPlayer: {
+      nickname: player.nickname,
+      snakeId: player.snakeId,
+      snake: player.snake,
+      backgroundId: player.backgroundId,
+      walletAddress: player.walletAddress,
+    },
+    mode: room.mode,
+    settings: room.settings,
+  });
+
+  // Tag both rooms so the opponent can find the rematch via polling.
+  newRoom.rematchFrom = room.code;
+  room.rematchCode = newRoom.code;
+  room.rematchInviteUrl = newRoom.inviteUrl;
+
+  // Broadcast updated state to anyone still connected to the old room so their
+  // Results page can show the rematch invite without polling.
+  emitRoom(room);
+
+  const host = newRoom.players[0];
+  return res.status(201).json({
+    code: newRoom.code,
+    inviteUrl: newRoom.inviteUrl,
+    hostPlayerId: host.id,
+    hostPlayerToken: host.authToken,
+    room: publicRoom(newRoom),
   });
 });
 
