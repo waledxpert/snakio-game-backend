@@ -239,6 +239,20 @@ function comparePlayers(a, b) {
   return null;
 }
 
+function compareByLength(a, b) {
+  if (a.length !== b.length) return a.length > b.length ? a : b;
+  if (a.score !== b.score) return a.score > b.score ? a : b;
+  if (a.applesCollected !== b.applesCollected) return a.applesCollected > b.applesCollected ? a : b;
+  return null;
+}
+
+function compareByApples(a, b) {
+  if (a.applesCollected !== b.applesCollected) return a.applesCollected > b.applesCollected ? a : b;
+  if (a.score !== b.score) return a.score > b.score ? a : b;
+  if (a.length !== b.length) return a.length > b.length ? a : b;
+  return null;
+}
+
 function finishMatch(room, result) {
   if (room.status === "finished") return;
   clearRoomTimers(room);
@@ -262,6 +276,13 @@ function evaluateRoom(room) {
         reason: winner ? "Time expired" : "Time expired in a draw",
       };
     }
+    if (!host.alive && !guest.alive) {
+      const winner = comparePlayers(host, guest);
+      return {
+        winnerPlayerId: winner?.id ?? null,
+        reason: winner ? "Both players are out before time expired" : "Both players are out in a draw",
+      };
+    }
     return null;
   }
 
@@ -281,17 +302,35 @@ function evaluateRoom(room) {
   if (room.mode === "first_to_length") {
     const target = room.settings.targetLength || 100;
     const reached = room.players.filter((player) => player.length >= target);
-    if (!reached.length) return null;
-    reached.sort((a, b) => (a.thresholdReachedAt || Infinity) - (b.thresholdReachedAt || Infinity));
-    return { winnerPlayerId: reached[0].id, reason: `${reached[0].nickname} reached length ${target}` };
+    if (reached.length) {
+      reached.sort((a, b) => (a.thresholdReachedAt || Infinity) - (b.thresholdReachedAt || Infinity));
+      return { winnerPlayerId: reached[0].id, reason: `${reached[0].nickname} reached length ${target}` };
+    }
+    if (!host.alive && !guest.alive) {
+      const winner = compareByLength(host, guest);
+      return {
+        winnerPlayerId: winner?.id ?? null,
+        reason: winner ? `Both players are out before reaching length ${target}` : `Both players are out before reaching length ${target}`,
+      };
+    }
+    return null;
   }
 
   if (room.mode === "apple_rush") {
     const target = room.settings.targetApples || 25;
     const reached = room.players.filter((player) => player.applesCollected >= target);
-    if (!reached.length) return null;
-    reached.sort((a, b) => (a.thresholdReachedAt || Infinity) - (b.thresholdReachedAt || Infinity));
-    return { winnerPlayerId: reached[0].id, reason: `${reached[0].nickname} collected ${target} apples first` };
+    if (reached.length) {
+      reached.sort((a, b) => (a.thresholdReachedAt || Infinity) - (b.thresholdReachedAt || Infinity));
+      return { winnerPlayerId: reached[0].id, reason: `${reached[0].nickname} collected ${target} apples first` };
+    }
+    if (!host.alive && !guest.alive) {
+      const winner = compareByApples(host, guest);
+      return {
+        winnerPlayerId: winner?.id ?? null,
+        reason: winner ? `Both players are out before collecting ${target} apples` : `Both players are out before collecting ${target} apples`,
+      };
+    }
+    return null;
   }
 
   if (room.mode === "highest_score") {
