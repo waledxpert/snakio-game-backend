@@ -5,10 +5,21 @@ import cors from "cors";
 import { Server } from "socket.io";
 import { customAlphabet, nanoid } from "nanoid";
 import { z } from "zod";
-import { persistMatchResult, persistRoomSnapshot } from "./supabase.js";
+import {
+  persistMatchResult,
+  persistRoomSnapshot,
+  upsertPlayer,
+  getPlayer as getPlayerProfile,
+  insertScore,
+  bumpStreak,
+  fetchLeaderboard,
+  clearScores,
+  resetStreaks,
+} from "./supabase.js";
 
 const PORT = Number(process.env.PORT || 4000);
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+const ADMIN_KEY = (process.env.ADMIN_KEY || "").trim();
 const allowedOrigins = FRONTEND_URL.split(",").map((value) => value.trim()).filter(Boolean);
 const createCode = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 6);
 const SHARE_TTL_MS = 1000 * 60 * 5;
@@ -84,6 +95,39 @@ const progressSchema = z.object({
 const playerAuthSchema = z.object({
   playerId: z.string(),
   playerToken: z.string(),
+});
+
+const walletSchema = z
+  .string()
+  .trim()
+  .min(4)
+  .max(80);
+
+const upsertPlayerSchema = z.object({
+  walletAddress: walletSchema,
+  name: z.string().trim().max(20).optional().nullable(),
+});
+
+const LEADERBOARD_MODES = [
+  "classic_coil",
+  "time_attack",
+  "last_survivor",
+  "first_to_length",
+  "apple_rush",
+  "highest_score",
+];
+
+const submitScoreSchema = z.object({
+  walletAddress: walletSchema,
+  name: z.string().trim().max(20).optional().nullable(),
+  mode: z.enum(LEADERBOARD_MODES),
+  opponent: z.enum(["solo", "ai", "pvp"]).default("solo"),
+  difficulty: z.enum(["easy", "medium", "hard", "master"]).optional().nullable(),
+  score: z.number().int().nonnegative().default(0),
+  length: z.number().int().nonnegative().default(0),
+  apples: z.number().int().nonnegative().default(0),
+  durationMs: z.number().int().nonnegative().optional().nullable(),
+  won: z.boolean().optional().nullable(),
 });
 
 function normalizeSettings(mode, settings = {}) {
@@ -395,6 +439,69 @@ function createSharePayload(room, playerId) {
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, rooms: rooms.size, shares: sharedResults.size });
+});
+
+// ── Profiles ────────────────────────────────────────────────────────────────
+
+app.post("/api/players", async (req, res) => {
+  const parsed = upsertPlayerSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.issues[0]?.message || "Invalid player payload" });
+  }
+  const player = await upsertPlayer(parsed.data);
+  return res.status(200).json({ player });
+});
+
+app.get("/api/players/:address", async (req, res) => {
+  const profile = await getPlayerProfile(req.params.address);
+  if (!profile) return res.status(404).json({ error: "Player not found" });
+  return res.json(profile);
+});
+
+// ── Scores + leaderboard ─────────────────────────────────────────────────────
+
+app.post("/api/scores", async (req, res) => {
+  const parsed = submitScoreSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.issues[0]?.message || "Invalid score payload" });
+  }
+  const data = parsed.data;
+
+  // vs-AI runs feed the personal winning streak; solo runs never do.
+  let streak = 0;
+  if (data.opponent === "ai" && typeof data.won === "boolean") {
+    const result = await bumpStreak(data.walletAddress, "pvai", data.won);
+    streak = result.current;
+  }
+
+  const row = await insertScore({ ...data, streak });
+  return res.status(201).json({ score: row, streak });
+});
+
+app.get("/api/leaderboard", async (req, res) => {
+  const result = await fetchLeaderboard({
+    mode: req.query.mode,
+    difficulty: req.query.difficulty,
+    opponent: req.query.opponent,
+    page: req.query.page,
+    pageSize: req.query.pageSize,
+  });
+  return res.json(result);
+});
+
+app.delete("/api/leaderboard", async (req, res) => {
+  if (!ADMIN_KEY || req.get("x-admin-key") !== ADMIN_KEY) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  const scores = await clearScores({
+    mode: req.query.mode,
+    difficulty: req.query.difficulty,
+    opponent: req.query.opponent,
+  });
+  // A full wipe also resets streaks; filtered clears leave streaks intact.
+  const unfiltered = !req.query.mode && !req.query.difficulty && !req.query.opponent;
+  const streaks = unfiltered ? await resetStreaks() : { deleted: 0 };
+  return res.json({ deleted: scores.deleted, streaksReset: streaks.deleted });
 });
 
 app.post("/api/matches", (req, res) => {
